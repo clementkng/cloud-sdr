@@ -1,0 +1,168 @@
+From c82da6ec8ecf8df46d54bd7e859e86b79c1b9eac Mon Sep 17 00:00:00 2001
+From: Bruce Potter <bp@us.ibm.com>
+Date: Tue, 12 Jun 2018 16:42:21 -0400
+Subject: [PATCH] refined msg hub pub sync example
+
+---
+ .../example-go-publisher/.gitignore           |  1 +
+ .../example-go-publisher/Makefile             |  4 ++
+ .../example-go-publisher/README.md            |  8 ++-
+ .../msghub-pub.go}                            |  1 +
+ .../{msghubpub.go => msghub-pubsync.go}       | 52 ++++++++++++++++---
+ 5 files changed, 58 insertions(+), 8 deletions(-)
+ create mode 100644 cloud/sdr/sdr-data-ingest/example-go-publisher/.gitignore
+ create mode 100644 cloud/sdr/sdr-data-ingest/example-go-publisher/Makefile
+ rename cloud/sdr/sdr-data-ingest/example-go-publisher/{msghubpub-confluent.go => confluent/msghub-pub.go} (97%)
+ rename cloud/sdr/sdr-data-ingest/example-go-publisher/{msghubpub.go => msghub-pubsync.go} (71%)
+
+diff --git a/cloud/sdr/sdr-data-ingest/example-go-publisher/.gitignore b/cloud/sdr/sdr-data-ingest/example-go-publisher/.gitignore
+new file mode 100644
+index 0000000..eb31e9c
+--- /dev/null
++++ b/cloud/sdr/sdr-data-ingest/example-go-publisher/.gitignore
+@@ -0,0 +1 @@
++msghub-pubsync
+\ No newline at end of file
+diff --git a/cloud/sdr/sdr-data-ingest/example-go-publisher/Makefile b/cloud/sdr/sdr-data-ingest/example-go-publisher/Makefile
+new file mode 100644
+index 0000000..2477a3e
+--- /dev/null
++++ b/cloud/sdr/sdr-data-ingest/example-go-publisher/Makefile
+@@ -0,0 +1,4 @@
++all: msghub-pubsync
++
++%: %.go
++	go build $<
+\ No newline at end of file
+diff --git a/cloud/sdr/sdr-data-ingest/example-go-publisher/README.md b/cloud/sdr/sdr-data-ingest/example-go-publisher/README.md
+index b96999b..af631a9 100644
+--- a/cloud/sdr/sdr-data-ingest/example-go-publisher/README.md
++++ b/cloud/sdr/sdr-data-ingest/example-go-publisher/README.md
+@@ -9,8 +9,14 @@ openssl req -new -x509 -key server.key -out server.pem -days 3650
+ export MSGHUB_API_KEY='abcdefg'
+ ```
+ 
++## Build All Examples
++
++```
++make
++```
++
+ ## Publish Synchronously
+ 
+ ```
+-go run msghubpub.go
++go run msghub-pubsync.go
+ ```
+diff --git a/cloud/sdr/sdr-data-ingest/example-go-publisher/msghubpub-confluent.go b/cloud/sdr/sdr-data-ingest/example-go-publisher/confluent/msghub-pub.go
+similarity index 97%
+rename from cloud/sdr/sdr-data-ingest/example-go-publisher/msghubpub-confluent.go
+rename to cloud/sdr/sdr-data-ingest/example-go-publisher/confluent/msghub-pub.go
+index 9881971..fa10c97 100644
+--- a/cloud/sdr/sdr-data-ingest/example-go-publisher/msghubpub-confluent.go
++++ b/cloud/sdr/sdr-data-ingest/example-go-publisher/confluent/msghub-pub.go
+@@ -1,3 +1,4 @@
++// !!This example currently does not work with IBM Message Hub!!
+ // Example for publishing messages to IBM Cloud Message Hub (kafka) using go
+ 
+ /* Current build/run requirements:
+diff --git a/cloud/sdr/sdr-data-ingest/example-go-publisher/msghubpub.go b/cloud/sdr/sdr-data-ingest/example-go-publisher/msghub-pubsync.go
+similarity index 71%
+rename from cloud/sdr/sdr-data-ingest/example-go-publisher/msghubpub.go
+rename to cloud/sdr/sdr-data-ingest/example-go-publisher/msghub-pubsync.go
+index dd804bf..e17933f 100644
+--- a/cloud/sdr/sdr-data-ingest/example-go-publisher/msghubpub.go
++++ b/cloud/sdr/sdr-data-ingest/example-go-publisher/msghub-pubsync.go
+@@ -15,12 +15,29 @@ import (
+ 	"os"
+ 	"strings"
+ 	"strconv"
++	"flag"
+ 	"crypto/tls"
+ 	"github.com/Shopify/sarama"
+ )
+ 
++var VerboseBool bool
++
++func Usage(exitCode int) {
++	fmt.Printf("Usage: %s [-h] [-v] [<message>]\n\nEnvironment Variables: MSGHUB_API_KEY, MSGHUB_BROKER_URL, MSGHUB_TOPIC\n", os.Args[0])
++	os.Exit(exitCode)
++}
++
+ func main() {
+-	fmt.Println("Starting message hub publishing example...")
++	var help bool
++	flag.BoolVar(&help, "h", false, "help")
++	flag.BoolVar(&VerboseBool, "v", false, "verbose")
++	flag.Parse()
++	if help { Usage(1) }
++
++	message := ""
++	if flag.NArg() >= 1 {
++		message = flag.Arg(0)
++	}
+ 
+ 	apiKey := requiredEnvVar("MSGHUB_API_KEY", "")
+ 	username := apiKey[:16]
+@@ -30,7 +47,11 @@ func main() {
+ 	brokers := strings.Split(brokerStr, ",")
+ 	topic := requiredEnvVar("MSGHUB_TOPIC", "sdr-audio")
+ 
+-	sarama.Logger = log.New(os.Stdout, "[sarama] ", log.LstdFlags)
++	Verbose("starting message hub publishing example...")
++
++	if VerboseBool {
++		sarama.Logger = log.New(os.Stdout, "[sarama] ", log.LstdFlags)
++	}
+ 
+ 	client, err := NewClient(username, password, apiKey, brokers)
+ 	exitOnErr(err)
+@@ -40,15 +61,32 @@ func main() {
+ 
+ 	defer Close(client, producer, nil)
+ 
+-	fmt.Printf("publishing a few msgs to %s...\n", topic)
+-	for i := 0; i < 10; i++ {
+-		err = SendMessage(producer, topic, "message "+strconv.Itoa(i))
++	if message != "" {
++		Verbose("publishing the specified msg to %s...\n", topic)
++		err = SendMessage(producer, topic, message)
++		exitOnErr(err)
++	} else {
++		Verbose("publishing a few generated msgs to %s...\n", topic)
++		for i := 0; i < 10; i++ {
++			err = SendMessage(producer, topic, "message "+strconv.Itoa(i))
++			exitOnErr(err)
++		}
+ 	}
+ 
+-	fmt.Println("Message hub publishing example complete.")
++	Verbose("message hub publishing example complete")
+ }
+ 
+ 
++func Verbose(msg string, args ...interface{}) {
++	if !VerboseBool {
++		return
++	}
++	if !strings.HasSuffix(msg, "\n") {
++		msg += "\n"
++	}
++	fmt.Fprintf(os.Stderr, "[verbose] "+msg, args...) // send to stderr so it doesn't mess up stdout if they are piping that to jq or something like that
++}
++
+ func requiredEnvVar(name, defaultVal string) string {
+ 	v := os.Getenv(name)
+ 	if defaultVal != "" {
+@@ -56,7 +94,7 @@ func requiredEnvVar(name, defaultVal string) string {
+ 	}
+ 	if v == "" {
+ 		fmt.Printf("Error: environment variable '%s' must be defined.\n", name)
+-		os.Exit(2)
++		Usage(2)
+ 	}
+ 	return v
+ }
+-- 
+2.24.3 (Apple Git-128)
+
