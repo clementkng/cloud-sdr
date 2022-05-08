@@ -1,0 +1,730 @@
+From 48b9699cd0d959504ecfd0c8bb4eaee38051ecde Mon Sep 17 00:00:00 2001
+From: Bruce Potter <bp@us.ibm.com>
+Date: Wed, 13 Jun 2018 14:16:01 -0400
+Subject: [PATCH] sdr msg hub consumer example working
+
+---
+ .../example-go-publisher/.gitignore           |   6 +-
+ .../example-go-publisher/Makefile             |   9 +-
+ .../example-go-publisher/README.md            |   6 +-
+ .../confluent/msghub-pub.go                   |  83 ---------
+ .../example-go-publisher/msghub-consumer.go   | 119 +++++++++++++
+ .../example-go-publisher/msghub-pubsync.go    | 162 ++++-------------
+ .../example-go-publisher/server.key           |  27 ---
+ .../example-go-publisher/server.pem           |  21 ---
+ .../example-go-publisher/util/util.go         | 163 ++++++++++++++++++
+ 9 files changed, 336 insertions(+), 260 deletions(-)
+ delete mode 100644 cloud/sdr/sdr-data-ingest/example-go-publisher/confluent/msghub-pub.go
+ create mode 100644 cloud/sdr/sdr-data-ingest/example-go-publisher/msghub-consumer.go
+ delete mode 100644 cloud/sdr/sdr-data-ingest/example-go-publisher/server.key
+ delete mode 100644 cloud/sdr/sdr-data-ingest/example-go-publisher/server.pem
+ create mode 100644 cloud/sdr/sdr-data-ingest/example-go-publisher/util/util.go
+
+diff --git a/cloud/sdr/sdr-data-ingest/example-go-publisher/.gitignore b/cloud/sdr/sdr-data-ingest/example-go-publisher/.gitignore
+index eb31e9c..9fb8ebf 100644
+--- a/cloud/sdr/sdr-data-ingest/example-go-publisher/.gitignore
++++ b/cloud/sdr/sdr-data-ingest/example-go-publisher/.gitignore
+@@ -1 +1,5 @@
+-msghub-pubsync
+\ No newline at end of file
++msghub-pubsync
++msghub-pubasync
++msghub-consumer
++server.key
++server.pem
+\ No newline at end of file
+diff --git a/cloud/sdr/sdr-data-ingest/example-go-publisher/Makefile b/cloud/sdr/sdr-data-ingest/example-go-publisher/Makefile
+index 2477a3e..d4d68f9 100644
+--- a/cloud/sdr/sdr-data-ingest/example-go-publisher/Makefile
++++ b/cloud/sdr/sdr-data-ingest/example-go-publisher/Makefile
+@@ -1,4 +1,9 @@
+-all: msghub-pubsync
++all: msghub-pubsync msghub-consumer
+ 
+ %: %.go
+-	go build $<
+\ No newline at end of file
++	go build $<
++
++clean:
++	rm -r msghub-pubsync msghub-consumer
++
++.PHONY: all clean
+\ No newline at end of file
+diff --git a/cloud/sdr/sdr-data-ingest/example-go-publisher/README.md b/cloud/sdr/sdr-data-ingest/example-go-publisher/README.md
+index af631a9..332d6ad 100644
+--- a/cloud/sdr/sdr-data-ingest/example-go-publisher/README.md
++++ b/cloud/sdr/sdr-data-ingest/example-go-publisher/README.md
+@@ -4,6 +4,7 @@
+ 
+ ```
+ go get github.com/Shopify/sarama
++go get github.com/bsm/sarama-cluster
+ openssl genrsa -out server.key 2048
+ openssl req -new -x509 -key server.key -out server.pem -days 3650
+ export MSGHUB_API_KEY='abcdefg'
+@@ -18,5 +19,8 @@ make
+ ## Publish Synchronously
+ 
+ ```
+-go run msghub-pubsync.go
++msghub-pubsync 'hello world'
++msghub-pubsync -v 'hello world'     # see verbose output
++msghub-pubsync    # will publish several generated msgs
++msghub-pubsync -h     # see all of the flags and environment variables
+ ```
+diff --git a/cloud/sdr/sdr-data-ingest/example-go-publisher/confluent/msghub-pub.go b/cloud/sdr/sdr-data-ingest/example-go-publisher/confluent/msghub-pub.go
+deleted file mode 100644
+index fa10c97..0000000
+--- a/cloud/sdr/sdr-data-ingest/example-go-publisher/confluent/msghub-pub.go
++++ /dev/null
+@@ -1,83 +0,0 @@
+-// !!This example currently does not work with IBM Message Hub!!
+-// Example for publishing messages to IBM Cloud Message Hub (kafka) using go
+-
+-/* Current build/run requirements:
+-- install librdkafka (on MacOS X: brew install librdkafka pkg-config
+-- go get -u github.com/confluentinc/confluent-kafka-go/kafka
+-*/ 
+-
+-package main
+-
+-import (
+-	"fmt"
+-	"os"
+-	"github.com/confluentinc/confluent-kafka-go/kafka"
+-)
+-
+-func requiredEnvVar(name, defaultVal string) string {
+-	v := os.Getenv(name)
+-	if defaultVal != "" {
+-		v = defaultVal
+-	}
+-	if v == "" {
+-		fmt.Printf("Error: environment variable '%s' must be defined.\n", name)
+-		os.Exit(2)
+-	}
+-	return v
+-}
+-
+-func main() {
+-	fmt.Println("Starting message hub publishing example...")
+-
+-	apiKey := requiredEnvVar("MSGHUB_API_KEY", "")
+-	username := apiKey[:16]
+-	password := apiKey[16:]
+-	fmt.Printf("username: %s, password: %s\n", username, password)
+-	brokerUrls := requiredEnvVar("MSGHUB_BROKER_URL", "kafka01-prod02.messagehub.services.us-south.bluemix.net:9093,kafka02-prod02.messagehub.services.us-south.bluemix.net:9093,kafka03-prod02.messagehub.services.us-south.bluemix.net:9093,kafka04-prod02.messagehub.services.us-south.bluemix.net:9093,kafka05-prod02.messagehub.services.us-south.bluemix.net:9093")
+-	topic := requiredEnvVar("MSGHUB_TOPIC", "sdr-audio")
+-
+-	// For valid kafka config values, see https://github.com/edenhill/librdkafka/blob/master/CONFIGURATION.md
+-	kafkaConfig := kafka.ConfigMap{
+-		//"bootstrap.servers": brokerUrls,
+-		"metadata.broker.list": brokerUrls,
+-		"sasl.mechanisms": "PLAIN",
+-		"sasl.username": username,
+-		"sasl.password": password,
+-	}
+-
+-	p, err := kafka.NewProducer(&kafkaConfig)
+-	if err != nil {
+-		panic(err)
+-	}
+-
+-	// Delivery report handler for produced messages
+-	go func() {
+-		for e := range p.Events() {
+-			switch ev := e.(type) {
+-			case *kafka.Message:
+-				if ev.TopicPartition.Error != nil {
+-					fmt.Printf("Delivery failed: %v\n", ev.TopicPartition)
+-				} else {
+-					fmt.Printf("Delivered message to %v\n", ev.TopicPartition)
+-				}
+-			}
+-		}
+-	}()
+-
+-	// Produce messages to topic (asynchronously)
+-	fmt.Printf("publishing a few msgs to %s...\n", topic)
+-	for _, word := range []string{"someaudiodata" /*, "moreaudiodata"*/} {
+-		err := p.Produce(&kafka.Message{
+-			TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
+-			Value:          []byte(word),
+-		}, nil)
+-		if err != nil {
+-			fmt.Printf("Error from Produce(): %v\n", err)
+-		}
+-	}
+-
+-	// Wait for message deliveries
+-	p.Flush(15 * 1000)
+-
+-	fmt.Println("Message hub publishing example complete.")
+-}
+diff --git a/cloud/sdr/sdr-data-ingest/example-go-publisher/msghub-consumer.go b/cloud/sdr/sdr-data-ingest/example-go-publisher/msghub-consumer.go
+new file mode 100644
+index 0000000..ca4d5f7
+--- /dev/null
++++ b/cloud/sdr/sdr-data-ingest/example-go-publisher/msghub-consumer.go
+@@ -0,0 +1,119 @@
++// Example for consuming  messages from IBM Cloud Message Hub (kafka) using go.
++// See README.md for setup requirements.
++
++package main
++
++import (
++	"fmt"
++	"log"
++	"os"
++	"os/signal"
++	"strings"
++	"flag"
++	"github.com/Shopify/sarama"
++	cluster "github.com/bsm/sarama-cluster"
++	"github.com/open-horizon/examples/cloud/sdr/sdr-data-ingest/example-go-publisher/util"
++)
++
++func Usage(exitCode int) {
++	fmt.Printf("Usage: %s [-t <topic>] [-h] [-v]\n\nEnvironment Variables: MSGHUB_API_KEY, MSGHUB_BROKER_URL, MSGHUB_TOPIC\n", os.Args[0])
++	os.Exit(exitCode)
++}
++
++func main() {
++	// Get all of the input options
++	var topic string
++	flag.StringVar(&topic, "t", "", "topic")
++	var help bool
++	flag.BoolVar(&help, "h", false, "help")
++	flag.BoolVar(&util.VerboseBool, "v", false, "verbose")
++	flag.Parse()
++	if help { Usage(1) }
++
++	apiKey := util.RequiredEnvVar("MSGHUB_API_KEY", "")
++	username := apiKey[:16]
++	password := apiKey[16:]
++	util.Verbose("username: %s, password: %s\n", username, password)
++	brokerStr := util.RequiredEnvVar("MSGHUB_BROKER_URL", "kafka01-prod02.messagehub.services.us-south.bluemix.net:9093,kafka02-prod02.messagehub.services.us-south.bluemix.net:9093,kafka03-prod02.messagehub.services.us-south.bluemix.net:9093,kafka04-prod02.messagehub.services.us-south.bluemix.net:9093,kafka05-prod02.messagehub.services.us-south.bluemix.net:9093")
++	brokers := strings.Split(brokerStr, ",")
++	if topic == "" {
++		topic = util.RequiredEnvVar("MSGHUB_TOPIC", "sdr-audio")
++	}
++
++	util.Verbose("starting message hub consuming example...")
++
++	if util.VerboseBool {
++		sarama.Logger = log.New(os.Stdout, "[sarama] ", log.LstdFlags)
++	}
++
++	// init (custom) config, enable errors and notifications
++	config := cluster.NewConfig()
++	config.Consumer.Return.Errors = true
++	config.Group.Return.Notifications = true
++	err := util.PopulateConfig(&config.Config, username, password, apiKey)		// add creds and tls info
++	util.ExitOnErr(err)
++
++	// init consumer
++	consumer, err := cluster.NewConsumer(brokers, "my-consumer-group", []string{topic}, config)
++	util.ExitOnErr(err)
++	defer consumer.Close()
++
++	// trap SIGINT to trigger a shutdown.
++	signals := make(chan os.Signal, 1)
++	signal.Notify(signals, os.Interrupt)
++
++	// consume errors
++	go func() {
++		for err := range consumer.Errors() {
++			log.Printf("Error: %s\n", err.Error())
++		}
++	}()
++
++	// consume notifications
++	go func() {
++		for ntf := range consumer.Notifications() {
++			if util.VerboseBool {
++				log.Printf("Rebalanced: %+v\n", ntf)
++			}
++		}
++	}()
++
++	// consume messages, watch signals
++	fmt.Printf("Consuming messages produced to %s...\n", topic)
++	for {
++		select {
++		case msg, ok := <-consumer.Messages():
++			if ok {
++				//fmt.Fprintf(os.Stdout, "%s/%d/%d\t%s\t%s\n", msg.Topic, msg.Partition, msg.Offset, msg.Key, msg.Value)
++				if util.VerboseBool {
++					fmt.Printf("%s: %s (partition: %d, offset: %d)\n", msg.Topic, msg.Value, msg.Partition, msg.Offset)
++				} else {
++					fmt.Printf("%s: %s\n", msg.Topic, msg.Value)
++				}
++				consumer.MarkOffset(msg, "")	// mark message as processed
++			}
++		case <-signals:
++			return
++		}
++	}
++
++	/* This can only listen to 1 partition, or a hardcoded number of partitions...
++	client, err := util.NewClient(username, password, apiKey, brokers)
++	util.ExitOnErr(err)
++	consumer, err := sarama.NewConsumerFromClient(client)
++	util.ExitOnErr(err)
++	defer util.Close(client, nil, nil, consumer)
++	callback := func(msg *sarama.ConsumerMessage) {
++			if util.VerboseBool {
++				fmt.Printf("%s: %s (partition: %d, offset: %d)\n", msg.Topic, string(msg.Value), msg.Partition, msg.Offset)
++			} else {
++				fmt.Printf("%s: %s\n", msg.Topic, string(msg.Value))
++			}
++		}
++	fmt.Printf("Consuming messages produced to %s...\n", topic)
++	err = util.ConsumePartition(consumer, topic, 0, callback)
++	util.ExitOnErr(err)
++	*/
++
++	util.Verbose("message hub consuming example complete")   // we should never get here
++}
+diff --git a/cloud/sdr/sdr-data-ingest/example-go-publisher/msghub-pubsync.go b/cloud/sdr/sdr-data-ingest/example-go-publisher/msghub-pubsync.go
+index e17933f..77b1f91 100644
+--- a/cloud/sdr/sdr-data-ingest/example-go-publisher/msghub-pubsync.go
++++ b/cloud/sdr/sdr-data-ingest/example-go-publisher/msghub-pubsync.go
+@@ -1,11 +1,5 @@
+-// Example for publishing messages to IBM Cloud Message Hub (kafka) using go
+-
+-/* Current build/run requirements:
+-- go get github.com/Shopify/sarama
+-- openssl genrsa -out server.key 2048
+-- openssl req -new -x509 -key server.key -out server.pem -days 3650
+-- export MSGHUB_API_KEY='abcdefg'
+-*/ 
++// Example for publishing messages to IBM Cloud Message Hub (kafka) using go.
++// See README.md for setup requirements.
+ 
+ package main
+ 
+@@ -16,21 +10,22 @@ import (
+ 	"strings"
+ 	"strconv"
+ 	"flag"
+-	"crypto/tls"
+ 	"github.com/Shopify/sarama"
++	"github.com/open-horizon/examples/cloud/sdr/sdr-data-ingest/example-go-publisher/util"
+ )
+ 
+-var VerboseBool bool
+-
+ func Usage(exitCode int) {
+-	fmt.Printf("Usage: %s [-h] [-v] [<message>]\n\nEnvironment Variables: MSGHUB_API_KEY, MSGHUB_BROKER_URL, MSGHUB_TOPIC\n", os.Args[0])
++	fmt.Printf("Usage: %s [-t <topic>] [-h] [-v] [<message>]\n\nEnvironment Variables: MSGHUB_API_KEY, MSGHUB_BROKER_URL, MSGHUB_TOPIC\n", os.Args[0])
+ 	os.Exit(exitCode)
+ }
+ 
+ func main() {
++	// Get all of the input options
++	var topic string
++	flag.StringVar(&topic, "t", "", "topic")
+ 	var help bool
+ 	flag.BoolVar(&help, "h", false, "help")
+-	flag.BoolVar(&VerboseBool, "v", false, "verbose")
++	flag.BoolVar(&util.VerboseBool, "v", false, "verbose")
+ 	flag.Parse()
+ 	if help { Usage(1) }
+ 
+@@ -39,133 +34,50 @@ func main() {
+ 		message = flag.Arg(0)
+ 	}
+ 
+-	apiKey := requiredEnvVar("MSGHUB_API_KEY", "")
++	apiKey := util.RequiredEnvVar("MSGHUB_API_KEY", "")
+ 	username := apiKey[:16]
+ 	password := apiKey[16:]
+-	//fmt.Printf("username: %s, password: %s\n", username, password)
+-	brokerStr := requiredEnvVar("MSGHUB_BROKER_URL", "kafka01-prod02.messagehub.services.us-south.bluemix.net:9093,kafka02-prod02.messagehub.services.us-south.bluemix.net:9093,kafka03-prod02.messagehub.services.us-south.bluemix.net:9093,kafka04-prod02.messagehub.services.us-south.bluemix.net:9093,kafka05-prod02.messagehub.services.us-south.bluemix.net:9093")
++	util.Verbose("username: %s, password: %s\n", username, password)
++	brokerStr := util.RequiredEnvVar("MSGHUB_BROKER_URL", "kafka01-prod02.messagehub.services.us-south.bluemix.net:9093,kafka02-prod02.messagehub.services.us-south.bluemix.net:9093,kafka03-prod02.messagehub.services.us-south.bluemix.net:9093,kafka04-prod02.messagehub.services.us-south.bluemix.net:9093,kafka05-prod02.messagehub.services.us-south.bluemix.net:9093")
+ 	brokers := strings.Split(brokerStr, ",")
+-	topic := requiredEnvVar("MSGHUB_TOPIC", "sdr-audio")
++	if topic == "" {
++		topic = util.RequiredEnvVar("MSGHUB_TOPIC", "sdr-audio")
++	}
+ 
+-	Verbose("starting message hub publishing example...")
++	util.Verbose("starting message hub publishing example...")
+ 
+-	if VerboseBool {
++	if util.VerboseBool {
+ 		sarama.Logger = log.New(os.Stdout, "[sarama] ", log.LstdFlags)
+ 	}
+ 
+-	client, err := NewClient(username, password, apiKey, brokers)
+-	exitOnErr(err)
++	client, err := util.NewClient(username, password, apiKey, brokers)
++	util.ExitOnErr(err)
+ 
+ 	producer, err := sarama.NewSyncProducerFromClient(client)
+-	exitOnErr(err)
++	util.ExitOnErr(err)
+ 
+-	defer Close(client, producer, nil)
++	defer util.Close(client, producer, nil, nil)
+ 
+ 	if message != "" {
+-		Verbose("publishing the specified msg to %s...\n", topic)
+-		err = SendMessage(producer, topic, message)
+-		exitOnErr(err)
++		util.Verbose("publishing the specified msg to %s...\n", topic)
++		err = util.SendSyncMessage(producer, topic, message)
++		util.ExitOnErr(err)
+ 	} else {
+-		Verbose("publishing a few generated msgs to %s...\n", topic)
+-		for i := 0; i < 10; i++ {
+-			err = SendMessage(producer, topic, "message "+strconv.Itoa(i))
+-			exitOnErr(err)
++		numMsgs := 10
++		util.Verbose("publishing %d generated msgs to %s...\n", numMsgs, topic)
++		msgs := make([]string, numMsgs)
++		for i := 0; i < numMsgs; i++ {
++			msgs[i] = "message "+strconv.Itoa(i)
+ 		}
+-	}
+-
+-	Verbose("message hub publishing example complete")
+-}
+-
+-
+-func Verbose(msg string, args ...interface{}) {
+-	if !VerboseBool {
+-		return
+-	}
+-	if !strings.HasSuffix(msg, "\n") {
+-		msg += "\n"
+-	}
+-	fmt.Fprintf(os.Stderr, "[verbose] "+msg, args...) // send to stderr so it doesn't mess up stdout if they are piping that to jq or something like that
+-}
+-
+-func requiredEnvVar(name, defaultVal string) string {
+-	v := os.Getenv(name)
+-	if defaultVal != "" {
+-		v = defaultVal
+-	}
+-	if v == "" {
+-		fmt.Printf("Error: environment variable '%s' must be defined.\n", name)
+-		Usage(2)
+-	}
+-	return v
+-}
+-
+-func exitOnErr(err error) {
+-	if err != nil {
+-		fmt.Printf("Error: %s\n", err.Error())
+-		os.Exit(2)
+-	}
+-}
+-
+-func tlsConfig(certFile, keyFile string) (*tls.Config, error) {
+-	cer, err := tls.LoadX509KeyPair(certFile, keyFile)
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	return &tls.Config{Certificates: []tls.Certificate{cer}}, nil
+-}
+-
+-func NewClient(user, pw, apiKey string, brokers []string) (sarama.Client, error) {
+-	tlsConfig, err := tlsConfig("server.pem", "server.key")
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	config := sarama.NewConfig()
+-	config.ClientID = apiKey
+-	config.Producer.RequiredAcks = sarama.WaitForAll
+-	config.Producer.Retry.Max = 5
+-	config.Producer.Return.Successes = true
+-	config.Net.TLS.Enable = true
+-	config.Net.TLS.Config = tlsConfig
+-	config.Net.SASL.User = user
+-	config.Net.SASL.Password = pw
+-	config.Net.SASL.Enable = true
+-
+-	client, err := sarama.NewClient(brokers, config)
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	return client, nil
+-}
+-
+-func SendMessage(producer sarama.SyncProducer, topic, msg string) error {
+-	pMsg := &sarama.ProducerMessage{
+-		Topic: topic,
+-		Value: sarama.StringEncoder(msg),
+-	}
+-
+-	partition, offset, err := producer.SendMessage(pMsg)
+-	if err != nil {
+-		return err
+-	}
+-	fmt.Printf("Message published to topic(%s)/partition(%d)/offset(%d)\n", topic, partition, offset)
+-	return nil
+-}
+-
+-func Close(client sarama.Client, producer sarama.SyncProducer, consumer sarama.Consumer) {
+-	if producer != nil {
+-		if err := producer.Close(); err != nil {
+-			log.Fatalln(err)
++		err = util.SendSyncMessages(producer, topic, msgs)
++		util.ExitOnErr(err)
++		/* can do this in a single call instead...
++		for i := 0; i < numMsgs; i++ {
++			err = util.SendSyncMessage(producer, topic, "message "+strconv.Itoa(i))
++			util.ExitOnErr(err)
+ 		}
++		*/
+ 	}
+-	if consumer != nil {
+-		if err := consumer.Close(); err != nil {
+-			log.Fatalln(err)
+-		}
+-	}
+-	if err := client.Close(); err != nil {
+-		log.Fatalln(err)
+-	}
++
++	util.Verbose("message hub publishing example complete")
+ }
+diff --git a/cloud/sdr/sdr-data-ingest/example-go-publisher/server.key b/cloud/sdr/sdr-data-ingest/example-go-publisher/server.key
+deleted file mode 100644
+index 0b7488c..0000000
+--- a/cloud/sdr/sdr-data-ingest/example-go-publisher/server.key
++++ /dev/null
+@@ -1,27 +0,0 @@
+------BEGIN RSA PRIVATE KEY-----
+-MIIEowIBAAKCAQEAspNj5F/dhYBCk0d7MvaOcHE3FGot2BSd8GJ2iv2WtwODxyYB
+-+TNJ1ddsge1CNlo6yIeNQjDIzz2PSceSg5XyJoOeYZgFsEKIxLP9HRxi28PzObtY
+-/5Fge+dwmHQ1mmDqOfBUr1JWtWBN4SMfk7ETsZ/6a1/t4f2HipcWIgf91urkwaLh
+-GVSMsKDw4r7AFj5F37LfgLiuT6ms3rfIBwEveJuDCOu//j6fE4vvNubKI4ZswWdq
+-XbMihmTmX4PTIVZ5X6AJgrntQqj4myShGnpC8IYQQyoC6kxLOJytyesaJUclIKfe
+-JwzhdGCvjAUeJfBV+Eppasm6Z9A7SW5H2L4NdQIDAQABAoIBAFOcWRALpq+kLwfA
+-Vzm0YVraV3yyfkaG2LA9md1YAKIt/hxXemMQlYiPNdnbmb3TH2TWutf7+Xm3DAjy
+-bXI42ckYpSZyxG8Tp+/ZijCAIvVc2Nv2ESSQD8nTwk9PUe23ZNO96Biyh7Cip7Q6
+-+sTvCxaGnfx6TOocB8NnHFDQxxRB3JDXPb7oIOb8pU/PzMY/pjgPwEDdcFbq4Y9U
+-dLvGSrrswJvL5xYU579n/3ek2XDz6RRkst8zsLAfRGBL0VeipGj+Oe459YnMa7p2
+-2nvTm//W+eDwD091I2So1G3cdFOh5wgccmwyay7brIe9QYL+uzTWOE/m9lEbLkoM
+-fcxDsz0CgYEA26E/fR47aG5D4Dvf+6frJ9qnTVs79BxwIe5heYbpmiYov6NS5D+o
+-x2+CTblT+DlFPvSFEaCfwqqg6e7iTobGdH6Ct0ex4TEyXQeHELm/iEs58gT343Ys
+-Z1Bp4prWHzASRF60eRipXuJElTz/Ydzuf60o6+gnsc6PQ7AnBPK/jF8CgYEA0CW8
+-1EhWVoP5swh0l2mfxpSxQ+9+s/CjhJApJ5iFDcYvOTn+P/eVaxTGyf98TUyHwlEn
+-Q72QLymyR0dkAl5HAI1uOOxIx/v9O1FimwamqFzflIUk0GA5IOt98fsOlo80gV2Q
+-0/gH/ojgHVEm0BBfu+rCVsYB5jm/yIsQYicY9qsCgYEAwvRpZOi3F0X5nkvH0J0H
+-kkL3CyWXHGM57gSqJbPqHFkPBr01UUJo0U9cPR3rOYWsv+tRS4pnBedsGvtfixD7
+-jGDYK1TKwvhmmkmaTPB04cjU0M40NIard7Hbq7iBpQGI1YOzc2K+xWjYNBkHIJl6
+-Y38TugRDaAPRC+aLXEsWWMUCgYA184IlV/ahCCZBxJBL6sHSPBpSbJJf26DWrHMu
+-Yzchodv9rk17kRX2onUASKuUcaDCujw+L7VetCUUmqmOf5dRylbmhEA9LdCufmLb
+-ofayrxf4rCYlqLtGECQeA5/9YHMQkQsIFkMkM6A7mRxBU+0sjSYATeSSIyfVuE3v
+-0wiCbwKBgFMNs+gk05p4yC31u2ry7XJ/tI3ChaU8ZnW1hivNHR2bxyKHXcNu8dnQ
+-tAIKipW4yuDtBWrvKxYjo+RU3aqQwzd5ZK77g4u1lyOIlW9e0Jt0UsOUjPfnLyQy
+-A0l2JxtuyXKbE7bmFQTxUPs/c3dpkC7W3kA9DL50EJHpnIad7H5C
+------END RSA PRIVATE KEY-----
+diff --git a/cloud/sdr/sdr-data-ingest/example-go-publisher/server.pem b/cloud/sdr/sdr-data-ingest/example-go-publisher/server.pem
+deleted file mode 100644
+index 3ae1a10..0000000
+--- a/cloud/sdr/sdr-data-ingest/example-go-publisher/server.pem
++++ /dev/null
+@@ -1,21 +0,0 @@
+------BEGIN CERTIFICATE-----
+-MIIDhjCCAm4CCQCby9nhrOmyrjANBgkqhkiG9w0BAQsFADCBhDELMAkGA1UEBhMC
+-VVMxCzAJBgNVBAgMAk5ZMRMwEQYDVQQHDApTYXVnZXJ0aWVzMQwwCgYDVQQKDANJ
+-Qk0xDzANBgNVBAsMBkFwcFNjaTEWMBQGA1UEAwwNYnBAdXMuaWJtLmNvbTEcMBoG
+-CSqGSIb3DQEJARYNYnBAdXMuaWJtLmNvbTAeFw0xODA2MTIxMzI0MzJaFw0yODA2
+-MDkxMzI0MzJaMIGEMQswCQYDVQQGEwJVUzELMAkGA1UECAwCTlkxEzARBgNVBAcM
+-ClNhdWdlcnRpZXMxDDAKBgNVBAoMA0lCTTEPMA0GA1UECwwGQXBwU2NpMRYwFAYD
+-VQQDDA1icEB1cy5pYm0uY29tMRwwGgYJKoZIhvcNAQkBFg1icEB1cy5pYm0uY29t
+-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAspNj5F/dhYBCk0d7MvaO
+-cHE3FGot2BSd8GJ2iv2WtwODxyYB+TNJ1ddsge1CNlo6yIeNQjDIzz2PSceSg5Xy
+-JoOeYZgFsEKIxLP9HRxi28PzObtY/5Fge+dwmHQ1mmDqOfBUr1JWtWBN4SMfk7ET
+-sZ/6a1/t4f2HipcWIgf91urkwaLhGVSMsKDw4r7AFj5F37LfgLiuT6ms3rfIBwEv
+-eJuDCOu//j6fE4vvNubKI4ZswWdqXbMihmTmX4PTIVZ5X6AJgrntQqj4myShGnpC
+-8IYQQyoC6kxLOJytyesaJUclIKfeJwzhdGCvjAUeJfBV+Eppasm6Z9A7SW5H2L4N
+-dQIDAQABMA0GCSqGSIb3DQEBCwUAA4IBAQAVHWv6nVnNQ//QFAR7m5dgDDM5+nbd
+-zcHKzykNUeZ6H7IED9wSh2zWeY409keYj8N1F05TchnlCyS9Ah13VhVrBqvcREE0
+-jCxIZigcbGgtrtA/61fhGu8JrqvifjcsjhoGCyW+LrUgj7iboYK0JWxo8DNqJFRv
+-s+be4sKAmV6RLrEykQvYiX+/rvGxmkHqHLjo7cCeNpSOa6W2Zaxw8Gn9TNXZQpYf
+-9OsS55gilV4EpX3AuWtJt/juOvSzndtQwgi/QSRg6Fsyyt7wEGeDQhAF6g6j8hOu
+-WppqG3do8qO0Y8kM3gVTO9BugSSXMfsiskpBEkS1l4R7Vq4Oj+bWSktt
+------END CERTIFICATE-----
+diff --git a/cloud/sdr/sdr-data-ingest/example-go-publisher/util/util.go b/cloud/sdr/sdr-data-ingest/example-go-publisher/util/util.go
+new file mode 100644
+index 0000000..ea4031d
+--- /dev/null
++++ b/cloud/sdr/sdr-data-ingest/example-go-publisher/util/util.go
+@@ -0,0 +1,163 @@
++// Utility functions for the examples for publishing and consuming messages to/fromm IBM Cloud Message Hub (kafka) using go
++
++/* Todos:
++- implement async producer
++- decide what to do with tls key and pem
++*/
++
++package util
++
++import (
++	"fmt"
++	"log"
++	"os"
++	"strings"
++	"crypto/tls"
++	"github.com/Shopify/sarama"
++)
++
++var VerboseBool bool
++
++func Verbose(msg string, args ...interface{}) {
++	if !VerboseBool {
++		return
++	}
++	if !strings.HasSuffix(msg, "\n") {
++		msg += "\n"
++	}
++	fmt.Fprintf(os.Stderr, "[verbose] "+msg, args...) // send to stderr so it doesn't mess up stdout if they are piping that to jq or something like that
++}
++
++// RequiredEnvVar gets an env var value. If a default value is not supplied and the env var is not defined, a fatal error is displayed.
++func RequiredEnvVar(name, defaultVal string) string {
++	v := os.Getenv(name)
++	if defaultVal != "" {
++		v = defaultVal
++	}
++	if v == "" {
++		fmt.Printf("Error: environment variable '%s' must be defined.\n", name)
++		os.Exit(2)
++	}
++	return v
++}
++
++func ExitOnErr(err error) {
++	if err != nil {
++		fmt.Printf("Error: %s\n", err.Error())
++		os.Exit(2)
++	}
++}
++
++func TlsConfig(certFile, keyFile string) (*tls.Config, error) {
++	cer, err := tls.LoadX509KeyPair(certFile, keyFile)
++	if err != nil {
++		return nil, err
++	}
++
++	return &tls.Config{Certificates: []tls.Certificate{cer}}, nil
++}
++
++func NewClient(user, pw, apiKey string, brokers []string) (sarama.Client, error) {
++	config := sarama.NewConfig()
++	err := PopulateConfig(config, user, pw, apiKey)
++	if err != nil {
++		return nil, err
++	}
++
++	client, err := sarama.NewClient(brokers, config)
++	if err != nil {
++		return nil, err
++	}
++
++	return client, nil
++}
++
++func PopulateConfig(config *sarama.Config, user, pw, apiKey string) error {
++	tlsConfig, err := TlsConfig("server.pem", "server.key")
++	if err != nil {
++		return err
++	}
++
++	config.ClientID = apiKey
++	config.Producer.RequiredAcks = sarama.WaitForAll
++	config.Producer.Retry.Max = 5
++	config.Producer.Return.Successes = true
++	config.Net.TLS.Enable = true
++	config.Net.TLS.Config = tlsConfig
++	config.Net.SASL.User = user
++	config.Net.SASL.Password = pw
++	config.Net.SASL.Enable = true
++	return nil
++}
++
++func SendSyncMessage(producer sarama.SyncProducer, topic, msg string) error {
++	pMsg := &sarama.ProducerMessage{
++		Topic: topic,
++		Value: sarama.StringEncoder(msg),
++	}
++
++	partition, offset, err := producer.SendMessage(pMsg)
++	if err != nil {
++		return err
++	}
++	fmt.Printf("Message published to topic: %s, partition: %d, offset: %d\n", topic, partition, offset)
++	return nil
++}
++
++func SendSyncMessages(producer sarama.SyncProducer, topic string, msgs []string) error {
++	pMsgs := make([]*sarama.ProducerMessage, len(msgs))
++	for i, m := range msgs {
++		pMsgs[i] = &sarama.ProducerMessage{
++			Topic: topic,
++			Value: sarama.StringEncoder(m),
++		}
++	}
++
++	err := producer.SendMessages(pMsgs)
++	if err != nil {
++		return err
++	}
++	fmt.Printf("%d messages published to topic: %s\n", len(msgs), topic)
++	return nil
++}
++
++func ConsumePartition(consumer sarama.Consumer, topic string, partition int32, callback func(*sarama.ConsumerMessage)) error {
++	partitionConsumer, err := consumer.ConsumePartition(topic, partition, sarama.OffsetNewest)
++	if err != nil {
++		return err
++	}
++
++	defer func() {
++		if err := partitionConsumer.Close(); err != nil {
++			log.Fatalln(err)
++		}
++	}()
++
++	for {
++		select {
++		case msg := <-partitionConsumer.Messages():
++			callback(msg)
++		}
++	}
++}
++
++func Close(client sarama.Client, syncProducer sarama.SyncProducer, asyncProducer sarama.AsyncProducer, consumer sarama.Consumer) {
++	if syncProducer != nil {
++		if err := syncProducer.Close(); err != nil {
++			log.Fatalln(err)
++		}
++	}
++	if asyncProducer != nil {
++		if err := asyncProducer.Close(); err != nil {
++			log.Fatalln(err)
++		}
++	}
++	if consumer != nil {
++		if err := consumer.Close(); err != nil {
++			log.Fatalln(err)
++		}
++	}
++	if err := client.Close(); err != nil {
++		log.Fatalln(err)
++	}
++}
+-- 
+2.24.3 (Apple Git-128)
+
