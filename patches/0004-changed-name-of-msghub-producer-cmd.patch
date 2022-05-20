@@ -1,0 +1,186 @@
+From 53990270995a43ee9338821e3dfb36b432c3b26a Mon Sep 17 00:00:00 2001
+From: Bruce Potter <bp@us.ibm.com>
+Date: Wed, 13 Jun 2018 14:29:51 -0400
+Subject: [PATCH] changed name of msghub producer cmd
+
+---
+ .../example-go-publisher/.gitignore           |  3 +-
+ .../example-go-publisher/Makefile             |  4 +-
+ .../example-go-publisher/README.md            | 22 +++++--
+ .../{msghub-pubsync.go => msghub-producer.go} | 65 ++++++++++---------
+ 4 files changed, 54 insertions(+), 40 deletions(-)
+ rename cloud/sdr/sdr-data-ingest/example-go-publisher/{msghub-pubsync.go => msghub-producer.go} (50%)
+
+diff --git a/cloud/sdr/sdr-data-ingest/example-go-publisher/.gitignore b/cloud/sdr/sdr-data-ingest/example-go-publisher/.gitignore
+index 9fb8ebf..153327b 100644
+--- a/cloud/sdr/sdr-data-ingest/example-go-publisher/.gitignore
++++ b/cloud/sdr/sdr-data-ingest/example-go-publisher/.gitignore
+@@ -1,5 +1,4 @@
+-msghub-pubsync
+-msghub-pubasync
++msghub-producer
+ msghub-consumer
+ server.key
+ server.pem
+\ No newline at end of file
+diff --git a/cloud/sdr/sdr-data-ingest/example-go-publisher/Makefile b/cloud/sdr/sdr-data-ingest/example-go-publisher/Makefile
+index d4d68f9..c55c6f4 100644
+--- a/cloud/sdr/sdr-data-ingest/example-go-publisher/Makefile
++++ b/cloud/sdr/sdr-data-ingest/example-go-publisher/Makefile
+@@ -1,9 +1,9 @@
+-all: msghub-pubsync msghub-consumer
++all: msghub-producer msghub-consumer
+ 
+ %: %.go
+ 	go build $<
+ 
+ clean:
+-	rm -r msghub-pubsync msghub-consumer
++	rm -r msghub-producer msghub-consumer
+ 
+ .PHONY: all clean
+\ No newline at end of file
+diff --git a/cloud/sdr/sdr-data-ingest/example-go-publisher/README.md b/cloud/sdr/sdr-data-ingest/example-go-publisher/README.md
+index 332d6ad..41c554c 100644
+--- a/cloud/sdr/sdr-data-ingest/example-go-publisher/README.md
++++ b/cloud/sdr/sdr-data-ingest/example-go-publisher/README.md
+@@ -1,4 +1,4 @@
+-# IBM Message Hub Publish and Consume Client Examples in Go
++# IBM Message Hub Producer and Consumer Client Examples in Go
+ 
+ ## Setup
+ 
+@@ -16,11 +16,21 @@ export MSGHUB_API_KEY='abcdefg'
+ make
+ ```
+ 
+-## Publish Synchronously
++## Produce Messages to IBM Message Hub
+ 
+ ```
+-msghub-pubsync 'hello world'
+-msghub-pubsync -v 'hello world'     # see verbose output
+-msghub-pubsync    # will publish several generated msgs
+-msghub-pubsync -h     # see all of the flags and environment variables
++msghub-producer 'hello world'
++msghub-producer -t <topic> 'hello world'   # produce to a different topic
++msghub-producer -v 'hello world'     # see verbose output
++msghub-producer    # will publish several generated msgs
++msghub-producer -h     # see all of the flags and environment variables
++```
++
++## Produce Messages to IBM Message Hub
++
++```
++msghub-consumer
++msghub-consumer -t <topic>   # consume from a different topic
++msghub-consumer -v     # see verbose output
++msghub-consumer -h     # see all of the flags and environment variables
+ ```
+diff --git a/cloud/sdr/sdr-data-ingest/example-go-publisher/msghub-pubsync.go b/cloud/sdr/sdr-data-ingest/example-go-publisher/msghub-producer.go
+similarity index 50%
+rename from cloud/sdr/sdr-data-ingest/example-go-publisher/msghub-pubsync.go
+rename to cloud/sdr/sdr-data-ingest/example-go-publisher/msghub-producer.go
+index 77b1f91..58d84d9 100644
+--- a/cloud/sdr/sdr-data-ingest/example-go-publisher/msghub-pubsync.go
++++ b/cloud/sdr/sdr-data-ingest/example-go-publisher/msghub-producer.go
+@@ -1,4 +1,4 @@
+-// Example for publishing messages to IBM Cloud Message Hub (kafka) using go.
++// Example for producing messages to IBM Cloud Message Hub (kafka) using go.
+ // See README.md for setup requirements.
+ 
+ package main
+@@ -15,7 +15,7 @@ import (
+ )
+ 
+ func Usage(exitCode int) {
+-	fmt.Printf("Usage: %s [-t <topic>] [-h] [-v] [<message>]\n\nEnvironment Variables: MSGHUB_API_KEY, MSGHUB_BROKER_URL, MSGHUB_TOPIC\n", os.Args[0])
++	fmt.Printf("Usage: %s [-t <topic>] [-s] [-h] [-v] [<message>]\n\nEnvironment Variables: MSGHUB_API_KEY, MSGHUB_BROKER_URL, MSGHUB_TOPIC\n", os.Args[0])
+ 	os.Exit(exitCode)
+ }
+ 
+@@ -23,7 +23,8 @@ func main() {
+ 	// Get all of the input options
+ 	var topic string
+ 	flag.StringVar(&topic, "t", "", "topic")
+-	var help bool
++	var sync, help bool
++	flag.BoolVar(&sync, "s", false, "synchronous")
+ 	flag.BoolVar(&help, "h", false, "help")
+ 	flag.BoolVar(&util.VerboseBool, "v", false, "verbose")
+ 	flag.Parse()
+@@ -44,40 +45,44 @@ func main() {
+ 		topic = util.RequiredEnvVar("MSGHUB_TOPIC", "sdr-audio")
+ 	}
+ 
+-	util.Verbose("starting message hub publishing example...")
++	if !sync {
+ 
+-	if util.VerboseBool {
+-		sarama.Logger = log.New(os.Stdout, "[sarama] ", log.LstdFlags)
+-	}
+-
+-	client, err := util.NewClient(username, password, apiKey, brokers)
+-	util.ExitOnErr(err)
+-
+-	producer, err := sarama.NewSyncProducerFromClient(client)
+-	util.ExitOnErr(err)
++	} else {
++		util.Verbose("starting message hub producing example...")
+ 
+-	defer util.Close(client, producer, nil, nil)
++		if util.VerboseBool {
++			sarama.Logger = log.New(os.Stdout, "[sarama] ", log.LstdFlags)
++		}
+ 
+-	if message != "" {
+-		util.Verbose("publishing the specified msg to %s...\n", topic)
+-		err = util.SendSyncMessage(producer, topic, message)
++		client, err := util.NewClient(username, password, apiKey, brokers)
+ 		util.ExitOnErr(err)
+-	} else {
+-		numMsgs := 10
+-		util.Verbose("publishing %d generated msgs to %s...\n", numMsgs, topic)
+-		msgs := make([]string, numMsgs)
+-		for i := 0; i < numMsgs; i++ {
+-			msgs[i] = "message "+strconv.Itoa(i)
+-		}
+-		err = util.SendSyncMessages(producer, topic, msgs)
++
++		producer, err := sarama.NewSyncProducerFromClient(client)
+ 		util.ExitOnErr(err)
+-		/* can do this in a single call instead...
+-		for i := 0; i < numMsgs; i++ {
+-			err = util.SendSyncMessage(producer, topic, "message "+strconv.Itoa(i))
++
++		defer util.Close(client, producer, nil, nil)
++
++		if message != "" {
++			util.Verbose("producing the specified msg to %s...\n", topic)
++			err = util.SendSyncMessage(producer, topic, message)
++			util.ExitOnErr(err)
++		} else {
++			numMsgs := 10
++			util.Verbose("producing %d generated msgs to %s...\n", numMsgs, topic)
++			msgs := make([]string, numMsgs)
++			for i := 0; i < numMsgs; i++ {
++				msgs[i] = "message "+strconv.Itoa(i)
++			}
++			err = util.SendSyncMessages(producer, topic, msgs)
+ 			util.ExitOnErr(err)
++			/* can do this in a single call instead...
++			for i := 0; i < numMsgs; i++ {
++				err = util.SendSyncMessage(producer, topic, "message "+strconv.Itoa(i))
++				util.ExitOnErr(err)
++			}
++			*/
+ 		}
+-		*/
+ 	}
+ 
+-	util.Verbose("message hub publishing example complete")
++	util.Verbose("message hub producing example complete")
+ }
+-- 
+2.24.3 (Apple Git-128)
+
