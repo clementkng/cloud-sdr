@@ -1,0 +1,53 @@
+From acb4dccfb30f34b0b94df314b336296752405f88 Mon Sep 17 00:00:00 2001
+From: Bruce Potter <bp@us.ibm.com>
+Date: Thu, 14 Jun 2018 07:25:19 -0400
+Subject: [PATCH] removed 1 unused function
+
+---
+ .../example-go-clients/util/util.go           | 26 ++-----------------
+ 1 file changed, 2 insertions(+), 24 deletions(-)
+
+diff --git a/cloud/sdr/sdr-data-ingest/example-go-clients/util/util.go b/cloud/sdr/sdr-data-ingest/example-go-clients/util/util.go
+index 7748bb0..8402ef7 100644
+--- a/cloud/sdr/sdr-data-ingest/example-go-clients/util/util.go
++++ b/cloud/sdr/sdr-data-ingest/example-go-clients/util/util.go
+@@ -51,7 +51,8 @@ func TlsConfig(certFile, keyFile string) (*tls.Config, error) {
+ 	return &tls.Config{Certificates: []tls.Certificate{cer}}, nil
+ }
+ 
+-/*
++/* If you want to create your own client object, it can be done like this. We create the producer and
++	consumer objects directly, and let them own the client (so they also close them at the end).
+ func NewClient(user, pw, apiKey string, brokers []string) (sarama.Client, error) {
+ 	config, err := NewConfig(user, pw, apiKey)
+ 	if err != nil {
+@@ -95,26 +96,3 @@ func PopulateConfig(config *sarama.Config, user, pw, apiKey string) error {
+ 	config.Net.SASL.Enable = true
+ 	return nil
+ }
+-
+-/*
+-func Close(client sarama.Client, syncProducer sarama.SyncProducer, asyncProducer sarama.AsyncProducer, consumer sarama.Consumer) {
+-	if syncProducer != nil {
+-		if err := syncProducer.Close(); err != nil {
+-			log.Fatalln(err)
+-		}
+-	}
+-	if asyncProducer != nil {
+-		if err := asyncProducer.Close(); err != nil {
+-			log.Fatalln(err)
+-		}
+-	}
+-	if consumer != nil {
+-		if err := consumer.Close(); err != nil {
+-			log.Fatalln(err)
+-		}
+-	}
+-	if err := client.Close(); err != nil {
+-		log.Fatalln(err)
+-	}
+-}
+-*/
+-- 
+2.24.3 (Apple Git-128)
+
