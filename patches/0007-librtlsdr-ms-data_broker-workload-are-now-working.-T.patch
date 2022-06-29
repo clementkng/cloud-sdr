@@ -1,0 +1,648 @@
+From 616e924ed48181acbdc2cbd8d62f6aecd74cf47c Mon Sep 17 00:00:00 2001
+From: Isaac Leonard <ifleonar@us.ibm.com>
+Date: Thu, 14 Jun 2018 07:39:40 -0700
+Subject: [PATCH] librtlsdr ms, data_broker workload are now working. Training
+ is not.
+
+---
+ .../sdr/sdr_data_processing/watson/stt/stt.go |  68 +++++++++
+ edge/services/sdr/data_broker/main.go         | 135 ++++++++++++++++++
+ .../sdr/data_broker/train/label/main.go       | 128 +++++++++++++++++
+ edge/services/sdr/data_broker/train/main.go   |  99 +++++++++++++
+ .../data_broker/train/random_model/main.go    |  32 +++++
+ edge/services/sdr/librtlsdr/main.go           | 126 ++++++++++++++++
+ 6 files changed, 588 insertions(+)
+ create mode 100644 cloud/sdr/sdr_data_processing/watson/stt/stt.go
+ create mode 100644 edge/services/sdr/data_broker/main.go
+ create mode 100644 edge/services/sdr/data_broker/train/label/main.go
+ create mode 100644 edge/services/sdr/data_broker/train/main.go
+ create mode 100644 edge/services/sdr/data_broker/train/random_model/main.go
+ create mode 100644 edge/services/sdr/librtlsdr/main.go
+
+diff --git a/cloud/sdr/sdr_data_processing/watson/stt/stt.go b/cloud/sdr/sdr_data_processing/watson/stt/stt.go
+new file mode 100644
+index 0000000..8679431
+--- /dev/null
++++ b/cloud/sdr/sdr_data_processing/watson/stt/stt.go
+@@ -0,0 +1,68 @@
++package stt
++
++import (
++	"bytes"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io/ioutil"
++	"net/http"
++	"net/url"
++	"strconv"
++)
++
++type TranscribeResponse struct {
++	Results []Result `json:"results"`
++	Index   int      `json:"results_index"`
++}
++
++type Result struct {
++	Alternatives []Alternative `json:"alternatives"`
++	Final        bool          `json:"final"`
++}
++
++type Alternative struct {
++	Confidence float32 `json:"confidence"`
++	Transcript string  `json:"transcript"`
++}
++
++// AppendWAVheader for a 16k s16le wav file
++// This is ugly.
++// Don't do it if you have a better way.
++func appendWAVheader(rawAudio []byte) (wavAudio []byte) {
++	hexHeader := "5249464646520e0057415645666d74201000000001000100803e0000007d0000020010004c4953541a000000494e464f495346540e0000004c61766635382e31322e313030006461746100520e00"
++	header, err := hex.DecodeString(hexHeader)
++	if err != nil {
++		panic("bad hex")
++	}
++	wavAudio = append(header, rawAudio...)
++	ioutil.WriteFile("demo.wav", wavAudio, 0644)
++	return
++}
++
++// Transcribe a chunk of raw audio
++func Transcribe(rawAudio []byte, username, password string) (response TranscribeResponse, err error) {
++	wavAudio := appendWAVheader(rawAudio)
++	apiURL := "https://stream.watsonplatform.net/speech-to-text/api/v1/recognize"
++
++	u, _ := url.ParseRequestURI(apiURL)
++	urlStr := fmt.Sprintf("%v", u)
++	client := &http.Client{}
++	r, _ := http.NewRequest("POST", urlStr, bytes.NewReader(wavAudio))
++	r.SetBasicAuth(username, password)
++	r.Header.Add("Content-Type", "audio/wav")
++	resp, _ := client.Do(r)
++	if resp.StatusCode != http.StatusOK {
++		err = errors.New("got status" + strconv.Itoa(resp.StatusCode))
++		return
++	}
++	bytes, err := ioutil.ReadAll(resp.Body)
++	if err != nil {
++		return
++	}
++	if err = json.Unmarshal(bytes, &response); err != nil {
++		return
++	}
++	return
++}
+diff --git a/edge/services/sdr/data_broker/main.go b/edge/services/sdr/data_broker/main.go
+new file mode 100644
+index 0000000..e1e0b3b
+--- /dev/null
++++ b/edge/services/sdr/data_broker/main.go
+@@ -0,0 +1,135 @@
++package main
++
++import (
++	"errors"
++	"fmt"
++	"io/ioutil"
++	"net/http"
++	"strconv"
++
++	tf "github.com/tensorflow/tensorflow/tensorflow/go"
++)
++
++func opIsSafe(a string) bool {
++	safeOPtypes := []string{
++		"Const",
++		"Placeholder",
++		"Conv2D",
++		"Cast",
++		"Div",
++		"StatelessRandomNormal",
++		"ExpandDims",
++		"AudioSpectrogram",
++		"DecodeRaw",
++		"Reshape",
++		"MatMul",
++		"Sum",
++		"Softmax",
++		"Squeeze",
++		"RandomUniform",
++	}
++	for _, b := range safeOPtypes {
++		if b == a {
++			return true
++		}
++	}
++	return false
++}
++
++func getAudio(freq int) (audio []byte, err error) {
++	resp, err := http.Get("http://localhost:8080/audio/" + strconv.Itoa(freq))
++	if err != nil {
++		panic(err)
++	}
++	if resp.StatusCode != http.StatusOK {
++		err = errors.New("bad resp")
++		return
++	}
++	defer resp.Body.Close()
++	audio, err = ioutil.ReadAll(resp.Body)
++	return
++}
++
++type model struct {
++	Sess    *tf.Session
++	InputPH tf.Output
++	Output  tf.Output
++}
++
++func (m *model) goodness(audio []byte) (value float32, err error) {
++	inputTensor, err := tf.NewTensor(string(audio))
++	if err != nil {
++		return
++	}
++	result, err := m.Sess.Run(map[tf.Output]*tf.Tensor{m.InputPH: inputTensor}, []tf.Output{m.Output}, nil)
++	if err != nil {
++		return
++	}
++	value = result[0].Value().([]float32)[0]
++	return
++}
++
++func newModel(path string) (m model, err error) {
++	def, err := ioutil.ReadFile(path)
++	if err != nil {
++		panic(err)
++	}
++	graph := tf.NewGraph()
++	err = graph.Import(def, "")
++	if err != nil {
++		panic(err)
++	}
++	ops := graph.Operations()
++	unsafeOPs := map[string]bool{}
++	graphIsUnsafe := false
++	for _, op := range ops {
++		if !opIsSafe(op.Type()) {
++			unsafeOPs[op.Type()] = true
++			graphIsUnsafe = true
++		}
++	}
++	if graphIsUnsafe {
++		fmt.Println("The following OP types are not in whitelist:")
++		for op := range unsafeOPs {
++			fmt.Println(op)
++		}
++		err = errors.New("unsafe OPs")
++		return
++	}
++	outputOP := graph.Operation("Squeeze")
++	if outputOP == nil {
++		err = errors.New("output OP not found")
++		return
++	}
++	m.Output = outputOP.Output(0)
++
++	inputPHOP := graph.Operation("input/Placeholder")
++	if inputPHOP == nil {
++		err = errors.New("input OP not found")
++		return
++	}
++	m.InputPH = inputPHOP.Output(0)
++	m.Sess, err = tf.NewSession(graph, nil)
++	return
++}
++
++func main() {
++	//m, err := newModel("train/conv_model.pb")
++	m, err := newModel("train/random_model/random_model.pb")
++	if err != nil {
++		panic(err)
++	}
++	for {
++		//audio, err := getAudio(91100000)
++		audio, err := getAudio(89700000)
++		if err != nil {
++			panic(err)
++		}
++		ioutil.WriteFile("/tmp/dat1", audio, 0644)
++		val, err := m.goodness(audio)
++		if err != nil {
++			panic(err)
++		}
++		fmt.Println(val)
++	}
++}
+diff --git a/edge/services/sdr/data_broker/train/label/main.go b/edge/services/sdr/data_broker/train/label/main.go
+new file mode 100644
+index 0000000..3e63d0f
+--- /dev/null
++++ b/edge/services/sdr/data_broker/train/label/main.go
+@@ -0,0 +1,128 @@
++package main
++
++import (
++	"crypto/sha256"
++	"encoding/base32"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io/ioutil"
++	"net/http"
++	"os"
++	"strconv"
++
++	"github.com/open-horizon/examples/cloud/sdr/sdr_data_processing/watson/stt"
++)
++
++func getAudio(freq int) (audio []byte, err error) {
++	resp, err := http.Get("http://localhost:8080/audio/" + strconv.Itoa(freq))
++	if err != nil {
++		panic(err)
++	}
++	if resp.StatusCode != http.StatusOK {
++		err = errors.New("bad resp")
++		return
++	}
++	defer resp.Body.Close()
++	audio, err = ioutil.ReadAll(resp.Body)
++	if len(audio) < 100 {
++		panic("audio is too short")
++	}
++	return
++}
++
++// FreqToIndex converts a frequnecy to a list index.
++func FreqToIndex(freq float32, data PowerDist) int {
++	percentPos := (freq - data.Low) / (data.High - data.Low)
++	index := int(float32(len(data.Dbm)) * percentPos)
++	return index
++}
++
++func GetCeilingSignals(data PowerDist, celling float32) (stationFreqs []float32) {
++	for i := float32(85900000); i < data.High; i += 200000 {
++		dbm := data.Dbm[FreqToIndex(i, data)]
++		if dbm > celling && dbm != 0 {
++			stationFreqs = append(stationFreqs, i)
++		}
++	}
++	return
++}
++
++// PowerDist is the distribution of power of frequency.
++type PowerDist struct {
++	Low  float32   `json:"low"`
++	High float32   `json:"high"`
++	Dbm  []float32 `json:"dbm"`
++}
++
++func getPower() (power PowerDist, err error) {
++	resp, err := http.Get("http://localhost:8080/power")
++	if err != nil {
++		panic(err)
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		err = errors.New("bad resp")
++		return
++	}
++	jsonByte, err := ioutil.ReadAll(resp.Body)
++	if err != nil {
++		return
++	}
++	err = json.Unmarshal(jsonByte, &power)
++	return
++}
++
++func totalText(transcript stt.TranscribeResponse) (sum int) {
++	if len(transcript.Results) == 0 {
++		return
++	}
++	for _, result := range transcript.Results {
++		for _, alt := range result.Alternatives {
++			sum += len(alt.Transcript)
++		}
++	}
++	return
++}
++
++func main() {
++	username := os.Getenv("STT_USERNAME")
++	if username == "" {
++		panic("STT_USERNAME not set")
++	}
++	password := os.Getenv("STT_PASSWORD")
++	if password == "" {
++		panic("STT_USERNAME not set")
++	}
++	var i = 0
++	for {
++		power, err := getPower()
++		if err != nil {
++			panic(err)
++		}
++		stations := GetCeilingSignals(power, -13)
++		for _, station := range stations {
++			fmt.Println("starting freq", station)
++			audio, err := getAudio(int(station))
++			if err != nil {
++				panic(err)
++			}
++			transcript, err := stt.Transcribe(audio, username, password)
++			if err != nil {
++				panic(err)
++			}
++			fmt.Println(totalText(transcript), transcript)
++			hash := sha256.Sum256(audio)
++			name := base32.StdEncoding.EncodeToString(hash[:])
++			if totalText(transcript) > 20 {
++				err = ioutil.WriteFile("good/"+name+".raw", audio, 0644)
++			} else {
++				err = ioutil.WriteFile("nongood/"+name+".raw", audio, 0644)
++			}
++			if err != nil {
++				panic(err)
++			}
++			i++
++		}
++	}
++}
+diff --git a/edge/services/sdr/data_broker/train/main.go b/edge/services/sdr/data_broker/train/main.go
+new file mode 100644
+index 0000000..1e2e862
+--- /dev/null
++++ b/edge/services/sdr/data_broker/train/main.go
+@@ -0,0 +1,99 @@
++package main
++
++import (
++	"fmt"
++	"io/ioutil"
++	"os"
++
++	tf "github.com/tensorflow/tensorflow/tensorflow/go"
++
++	"github.com/tensorflow/tensorflow/tensorflow/go/op"
++)
++
++func model(s *op.Scope, input tf.Output) (class tf.Output) {
++	zero := op.Const(s.SubScope("zero"), int64(0))
++	one := op.Const(s.SubScope("one"), int64(1))
++	//two := op.Const(s.SubScope("two"), int64(2))
++	three := op.Const(s.SubScope("three"), int64(3))
++	//fzero := op.Const(s.SubScope("f0"), float32(0))
++	seed := op.Const(s.SubScope("seed"), []int64{9, 4})
++
++	filter1 := op.StatelessRandomNormal(s.SubScope("filter1"), op.Const(s.SubScope("filter1_dims"), []int64{7, 5, 1, 3}), seed)
++	filter2 := op.StatelessRandomNormal(s.SubScope("filter2"), op.Const(s.SubScope("filter2_dims"), []int64{7, 5, 3, 5}), seed)
++	filter3 := op.StatelessRandomNormal(s.SubScope("filter3"), op.Const(s.SubScope("filter3_dims"), []int64{7, 5, 5, 5}), seed)
++	fc := op.StatelessRandomNormal(s.SubScope("fc"), op.Const(s.SubScope("fc_shape"), []int64{5 * 5, 7}), seed)
++	readout := op.StatelessRandomNormal(s.SubScope("readout"), op.Const(s.SubScope("readout_shape"), []int64{7, 2}), seed)
++
++	//rawData := op.ReadFile(s.SubScope("read_audio"), op.Const(s.SubScope("filename"), "audio.raw"))
++
++	pcm := op.Div(s.SubScope("div_by_2_16"),
++		op.Cast(s, op.DecodeRaw(s.SubScope("decode_u16"), input, tf.Uint16), tf.Float),
++		op.Const(s.SubScope("65536"), float32(65536)),
++	)
++	spectrogram := op.AudioSpectrogram(s, op.ExpandDims(s, pcm, one), int64(100), int64(100))
++	conv1 := op.Conv2D(s.SubScope("conv1"),
++		op.ExpandDims(s.SubScope("add_chan"), spectrogram, three),
++		filter1,
++		[]int64{1, 5, 2, 1},
++		"VALID",
++	)
++	conv2 := op.Conv2D(s.SubScope("conv2"),
++		conv1,
++		filter2,
++		[]int64{1, 5, 2, 1},
++		"VALID",
++	)
++	conv3 := op.Conv2D(s.SubScope("conv3"),
++		conv2,
++		filter3,
++		[]int64{1, 5, 2, 1},
++		"VALID",
++	)
++	flat := op.Reshape(s, conv3, op.Const(s.SubScope("flat"), []int64{74, 25}))
++	timeOutput := op.MatMul(s, flat, fc)
++	sum := op.Sum(s, timeOutput, zero)
++	class = op.Squeeze(s, op.Softmax(s.SubScope("output"), op.MatMul(s.SubScope("readout"), op.ExpandDims(s.SubScope("readout"), sum, zero), readout)))
++	return
++}
++
++func trainingDataQueue(fileName, target tf.Output) (readBatch tf.Output, init tf.Operation) {
++  dataset := op.TensorSliceDataset(s, components, [])
++}
++
++func main() {
++	fmt.Println(tf.Version())
++	s := op.NewScope()
++	rawDataPH := op.Placeholder(s.SubScope("input"), tf.String)
++	output := model(s.SubScope("model"), rawDataPH)
++	fmt.Println(output.Op.Name())
++	fmt.Println(rawDataPH.Op.Name())
++	graph, err := s.Finalize()
++	if err != nil {
++		panic(err)
++	}
++	file, err := os.Create("conv_model.pb")
++	if err != nil {
++		panic(err)
++	}
++	_, err = graph.WriteTo(file)
++	if err != nil {
++		panic(err)
++	}
++	sess, err := tf.NewSession(graph, nil)
++	if err != nil {
++		panic(err)
++	}
++	rawBytes, err := ioutil.ReadFile("audio.raw")
++	if err != nil {
++		panic(err)
++	}
++	inputTensor, err := tf.NewTensor(string(rawBytes))
++	if err != nil {
++		panic(err)
++	}
++	result, err := sess.Run(map[tf.Output]*tf.Tensor{rawDataPH: inputTensor}, []tf.Output{output}, nil)
++	if err != nil {
++		panic(err)
++	}
++	fmt.Println(result[0].Value())
++}
+diff --git a/edge/services/sdr/data_broker/train/random_model/main.go b/edge/services/sdr/data_broker/train/random_model/main.go
+new file mode 100644
+index 0000000..305f4bb
+--- /dev/null
++++ b/edge/services/sdr/data_broker/train/random_model/main.go
+@@ -0,0 +1,32 @@
++package main
++
++import (
++	"fmt"
++	"os"
++
++	tf "github.com/tensorflow/tensorflow/tensorflow/go"
++
++	"github.com/tensorflow/tensorflow/tensorflow/go/op"
++)
++
++func main() {
++	fmt.Println(tf.Version())
++	s := op.NewScope()
++	rawDataPH := op.Placeholder(s.SubScope("input"), tf.String)
++	_ = rawDataPH
++
++	output := op.Squeeze(s, op.Softmax(s.SubScope("output"), op.RandomUniform(s, op.Const(s, []int64{1, 2}), tf.Float)))
++	_ = output
++	graph, err := s.Finalize()
++	if err != nil {
++		panic(err)
++	}
++	file, err := os.Create("random_model.pb")
++	if err != nil {
++		panic(err)
++	}
++	_, err = graph.WriteTo(file)
++	if err != nil {
++		panic(err)
++	}
++}
+diff --git a/edge/services/sdr/librtlsdr/main.go b/edge/services/sdr/librtlsdr/main.go
+new file mode 100644
+index 0000000..f46547e
+--- /dev/null
++++ b/edge/services/sdr/librtlsdr/main.go
+@@ -0,0 +1,126 @@
++package main
++
++import (
++	"bytes"
++	"encoding/csv"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"log"
++	"net/http"
++	"os/exec"
++	"strconv"
++	"strings"
++	"time"
++)
++
++func captureAudio(freq int) (audio []byte, err error) {
++	cmd := exec.Command("rtl_fm", "-M", "fm", "-s", "170k", "-o", "4", "-A", "fast", "-r", "16k", "-l", "0", "-E", "deemp", "-f", strconv.Itoa(freq))
++	var stdout, stderr bytes.Buffer
++	cmd.Stdout = &stdout
++	cmd.Stderr = &stderr
++	fmt.Println("starting command")
++	err = cmd.Start()
++	if err != nil {
++		panic(err)
++	}
++	time.Sleep(30 * time.Second)
++	err = cmd.Process.Kill()
++	if err != nil {
++		panic(err)
++	}
++	audio = stdout.Bytes()
++	//errStr := string(stderr.Bytes())
++	//fmt.Println(errStr)
++	return
++}
++
++const ROWS int = 18
++const COLS int = 411
++
++func stringListToFloat(stringList []string) (floatList []float32) {
++	for _, val := range stringList {
++		num, err := strconv.ParseFloat(strings.TrimSpace(val), 64)
++		if err != nil {
++			panic(err)
++		}
++		floatList = append(floatList, float32(num))
++	}
++	return
++}
++
++func capturePower() (power PowerDist, err error) {
++	start := 70000000
++	end := 110000000
++	power.Low = float32(start)
++	power.High = float32(end)
++	cmd := exec.Command("rtl_power", "-e", "10", "-c", "20%", "-f", strconv.Itoa(start)+":"+strconv.Itoa(end)+":10000")
++	var stdout bytes.Buffer
++	cmd.Stdout = &stdout
++	fmt.Println("starting command")
++	err = cmd.Run()
++	if err != nil {
++		panic(err)
++	}
++	r := csv.NewReader(bytes.NewReader(stdout.Bytes()))
++	recordList, err := r.ReadAll()
++	if err != nil {
++		return
++	}
++	if len(recordList) != ROWS {
++		err = errors.New("expected " + strconv.Itoa(ROWS) + " rows, got " + strconv.Itoa(len(recordList)) + " rows")
++		return
++	}
++	for _, row := range recordList {
++		if len(row[6:]) != COLS {
++			err = errors.New("expected " + strconv.Itoa(COLS) + " elems, got " + strconv.Itoa(len(row[6:])) + " elems")
++			return
++		}
++		power.Dbm = append(power.Dbm, stringListToFloat(row[6:])...)
++	}
++	//fmt.Println(recordList)
++	return
++}
++
++// PowerDist is the distribution of power of frequency.
++type PowerDist struct {
++	Low  float32   `json:"low"`
++	High float32   `json:"high"`
++	Dbm  []float32 `json:"dbm"`
++}
++
++func audioHandler(w http.ResponseWriter, r *http.Request) {
++	freq, err := strconv.Atoi(r.URL.Path[7:])
++	if err != nil {
++		w.WriteHeader(http.StatusBadRequest)
++		return
++	}
++	audio, err := captureAudio(freq)
++	if err != nil {
++		w.WriteHeader(http.StatusInternalServerError)
++		return
++	}
++	w.Write(audio)
++}
++
++func powerHandler(w http.ResponseWriter, r *http.Request) {
++	power, err := capturePower()
++	if err != nil {
++		w.WriteHeader(http.StatusInternalServerError)
++		return
++	}
++	jsonBytes, err := json.Marshal(power)
++	if err != nil {
++		w.WriteHeader(http.StatusInternalServerError)
++		return
++	}
++	w.Write(jsonBytes)
++}
++
++func main() {
++	http.HandleFunc("/audio/", audioHandler)
++	http.HandleFunc("/power", powerHandler)
++	log.Fatal(http.ListenAndServe(":8080", nil))
++}
++
++//78
+-- 
+2.24.3 (Apple Git-128)
+
