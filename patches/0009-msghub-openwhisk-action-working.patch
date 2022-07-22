@@ -1,0 +1,141 @@
+From 967ee9c2253dbf1f74ad77fd5d3f7c1e5de9c967 Mon Sep 17 00:00:00 2001
+From: Bruce Potter <bp@us.ibm.com>
+Date: Fri, 15 Jun 2018 14:36:36 -0400
+Subject: [PATCH] msghub openwhisk action working
+
+---
+ .../ibm-functions/Makefile                    | 35 +++++++++++++++++++
+ .../ibm-functions/README.md                   | 14 ++++++++
+ .../{msg-receive.js => actions/msgreceive.js} | 14 ++++++--
+ .../ibm-functions/actions/msgreceive_test.js  | 15 ++++++++
+ 4 files changed, 76 insertions(+), 2 deletions(-)
+ create mode 100644 cloud/sdr/sdr-data-processing/ibm-functions/Makefile
+ create mode 100644 cloud/sdr/sdr-data-processing/ibm-functions/README.md
+ rename cloud/sdr/sdr-data-processing/ibm-functions/{msg-receive.js => actions/msgreceive.js} (56%)
+ create mode 100644 cloud/sdr/sdr-data-processing/ibm-functions/actions/msgreceive_test.js
+
+diff --git a/cloud/sdr/sdr-data-processing/ibm-functions/Makefile b/cloud/sdr/sdr-data-processing/ibm-functions/Makefile
+new file mode 100644
+index 0000000..bd96321
+--- /dev/null
++++ b/cloud/sdr/sdr-data-processing/ibm-functions/Makefile
+@@ -0,0 +1,35 @@
++# Targets for creating IBM Functions objects.
++# To run these, you must have the 'bx wsk' CLI installed and be logged into it and set the target org and space.
++
++WSK_PACKAGE ?= message-hub-evnts
++WSK_ACTION ?= process-message
++ACTION_CODE ?= actions/msgreceive.js
++WSK_TRIGGER ?= message-hub-events-trgr
++WSK_RULE ?= message-hub-events-rule-2
++
++MSGHUB_NAME ?= Message_Hub-rt
++MSGHUB_TOPIC ?= sdr-audio
++
++# Upload a new version of the action code
++update-action: $(ACTION_CODE)
++	bx wsk action update --kind nodejs:8 $(WSK_PACKAGE)/$(WSK_ACTION) $<
++
++# This requires node.js be installed. On Mac: brew install node
++test-action: actions/msgreceive_test.js $(ACTION_CODE)
++	node $<
++
++# Create a trigger and action. Note: haven't tried this yet!!
++create: $(ACTION_CODE)
++	bx wsk package refresh
++	bx wsk trigger create $(WSK_TRIGGER) --feed Bluemix_$(MSGHUB_NAME)_Bruce_Credentials/messageHubFeed --param isJSONData true --param topic $(MSGHUB_TOPIC)
++	bx wsk action create $(WSK_PACKAGE)/$(WSK_ACTION) $< # do not think these flag from igor are needed: --param kafka $(KAFKA_INSTANCE) --param destTopic $(DEST_TOPIC)
++	bx wsk rule create $(WSK_RULE) $(WSK_TRIGGER) $(WSK_PACKAGE)/$(WSK_ACTION)
++
++# Remove a trigger and action. Note: haven't tried this yet!!
++remove:
++	bx wsk package refresh
++	bx wsk rule delete --disable $(WSK_RULE)
++	bx wsk trigger delete $(WSK_TRIGGER)
++	bx wsk action delete $(WSK_PACKAGE)/$(WSK_ACTION)
++
++.PHONY: update-action test-action create remove
+diff --git a/cloud/sdr/sdr-data-processing/ibm-functions/README.md b/cloud/sdr/sdr-data-processing/ibm-functions/README.md
+new file mode 100644
+index 0000000..02c12c4
+--- /dev/null
++++ b/cloud/sdr/sdr-data-processing/ibm-functions/README.md
+@@ -0,0 +1,14 @@
++# IBM Function actions for SDR Data Processing
++
++## IBM Functions Objects Being Used
++
++- package: /Hovitos_dev/message-hub-evnts
++- actions: /Hovitos_dev/message-hub-evnts/process-message
++- triggers: /Hovitos_dev/message-hub-events-trgr
++- rule: /Hovitos_dev/message-hub-events-rule-2
++- Message Hub instance: Message Hub-rt (Region: US South, CF Org: Hovitos, CF Space: dev)
++
++## See the Actions that Get Invoked
++```
++bx wsk activation poll
++```
+diff --git a/cloud/sdr/sdr-data-processing/ibm-functions/msg-receive.js b/cloud/sdr/sdr-data-processing/ibm-functions/actions/msgreceive.js
+similarity index 56%
+rename from cloud/sdr/sdr-data-processing/ibm-functions/msg-receive.js
+rename to cloud/sdr/sdr-data-processing/ibm-functions/actions/msgreceive.js
+index 6c68860..90bf6b5 100644
+--- a/cloud/sdr/sdr-data-processing/ibm-functions/msg-receive.js
++++ b/cloud/sdr/sdr-data-processing/ibm-functions/actions/msgreceive.js
+@@ -1,20 +1,30 @@
+ function main(params) {
++  var date = new Date();
++  if (params.messages && params.messages[0] && params.messages[0].value) {
++    console.log(params.messages.length + " messages received at: "+date.toLocaleString());
++  } else {
++    console.log("received message(s) at: "+date.toLocaleString());
++  }
+   return new Promise((resolve, reject) => {
+     if (!params.messages || !params.messages[0] || !params.messages[0].value) {
+       reject("Invalid arguments. Must include 'messages' JSON array with 'value' field");
+     }
+     const msgs = params.messages;
+-    const cats = [];
++    //const cats = [];
+     for (let i = 0; i < msgs.length; i++) {
+       const msg = msgs[i];
++      console.log("msg "+i+": "+msg.value);
++      /* parse the msg json
+       for (let j = 0; j < msg.value.cats.length; j++) {
+         const cat = msg.value.cats[j];
+         console.log(`A ${cat.color} cat named ${cat.name} was received.`);
+         cats.push(cat);
+       }
++      */
+     }
+     resolve({
+-      cats,
++        "result": "Success: Message from IBM Message Hub processed."
++        //cats,
+     });
+   });
+ }
+diff --git a/cloud/sdr/sdr-data-processing/ibm-functions/actions/msgreceive_test.js b/cloud/sdr/sdr-data-processing/ibm-functions/actions/msgreceive_test.js
+new file mode 100644
+index 0000000..90dff00
+--- /dev/null
++++ b/cloud/sdr/sdr-data-processing/ibm-functions/actions/msgreceive_test.js
+@@ -0,0 +1,15 @@
++// Locally test msg-receive.js
++
++const msgreceive = require('./msgreceive.js')
++
++params = {
++	"messages": [
++		{ "value": "this is my first msg" },
++		{ "value": "this is my 2nd msg" }
++	]
++}
++
++const result = msgreceive.main(params)
++
++console.log("msgreceive.main() result:")
++console.log(result)
+-- 
+2.24.3 (Apple Git-128)
+
