@@ -1,0 +1,125 @@
+From a8a21266d2d92a5792ac886fcca852b49f77b625 Mon Sep 17 00:00:00 2001
+From: Bruce Potter <bp@us.ibm.com>
+Date: Mon, 18 Jun 2018 15:01:27 -0400
+Subject: [PATCH] wsk nodejs action calling watson stt service
+
+---
+ .../ibm-functions/.gitignore                  |  4 +++
+ .../ibm-functions/README.md                   | 16 ++++++++++
+ .../ibm-functions/actions/msgreceive.js       | 32 +++++++++++++++++--
+ .../ibm-functions/actions/msgreceive_test.js  | 12 +++++--
+ 4 files changed, 58 insertions(+), 6 deletions(-)
+ create mode 100644 cloud/sdr/sdr-data-processing/ibm-functions/.gitignore
+
+diff --git a/cloud/sdr/sdr-data-processing/ibm-functions/.gitignore b/cloud/sdr/sdr-data-processing/ibm-functions/.gitignore
+new file mode 100644
+index 0000000..4c37949
+--- /dev/null
++++ b/cloud/sdr/sdr-data-processing/ibm-functions/.gitignore
+@@ -0,0 +1,4 @@
++node_modules/
++package-lock.json
++package.json
++.npmrc
+\ No newline at end of file
+diff --git a/cloud/sdr/sdr-data-processing/ibm-functions/README.md b/cloud/sdr/sdr-data-processing/ibm-functions/README.md
+index 02c12c4..c19be79 100644
+--- a/cloud/sdr/sdr-data-processing/ibm-functions/README.md
++++ b/cloud/sdr/sdr-data-processing/ibm-functions/README.md
+@@ -8,7 +8,23 @@
+ - rule: /Hovitos_dev/message-hub-events-rule-2
+ - Message Hub instance: Message Hub-rt (Region: US South, CF Org: Hovitos, CF Space: dev)
+ 
++## Test the Action Locally
++```
++make test-action
++```
++
++## Upload the Action to the IBM Functions Service
++```
++make update-action
++```
++
+ ## See the Actions that Get Invoked
+ ```
+ bx wsk activation poll
+ ```
++
++## Action Details
++
++- Node.js packages that are pre-installed in the IBM Funcions Node.js 8 environment: https://console.bluemix.net/docs/openwhisk/openwhisk_reference.html#openwhisk_ref_javascript_environments
++- Credentials needed inside the action should be passed as params when creating the action object
++- Watson Node.js package, including speec-to-text: https://www.npmjs.com/package/watson-developer-cloud#speech-to-text
+\ No newline at end of file
+diff --git a/cloud/sdr/sdr-data-processing/ibm-functions/actions/msgreceive.js b/cloud/sdr/sdr-data-processing/ibm-functions/actions/msgreceive.js
+index 90bf6b5..0b31987 100644
+--- a/cloud/sdr/sdr-data-processing/ibm-functions/actions/msgreceive.js
++++ b/cloud/sdr/sdr-data-processing/ibm-functions/actions/msgreceive.js
+@@ -1,3 +1,6 @@
++//var Client = require('node-rest-client').Client;
++var SpeechToTextV1 = require('watson-developer-cloud/speech-to-text/v1');
++
+ function main(params) {
+   var date = new Date();
+   if (params.messages && params.messages[0] && params.messages[0].value) {
+@@ -22,10 +25,33 @@ function main(params) {
+       }
+       */
+     }
+-    resolve({
+-        "result": "Success: Message from IBM Message Hub processed."
+-        //cats,
++
++    /*
++    var options_auth = { user: "8281900f-8621-43ae-b8a6-4656420bef9c", password: "OIZKxcVxxqF6" };
++    var client = new Client(options_auth);
++    client.get("https://stream.watsonplatform.net/speech-to-text/api/v1/models", function (data, response) {
++      console.log(data);     // parsed response body as js object
++      console.log(response);   // raw response
++    });
++    */
++
++    var speechToText = new SpeechToTextV1({
++      username: '8281900f-8621-43ae-b8a6-4656420bef9c',
++      password: 'OIZKxcVxxqF6'
+     });
++
++    speechToText.listModels(null, function(error, speechModels) {
++      if (error) {
++        console.log(error);
++        reject(error);
++      } else {
++        // const resolveStr = JSON.stringify(speechModels.models[0], null, 2);
++        console.log("Result from Watson Speech to Text Service:")
++        console.log(speechModels.models[0])
++        resolve({ "result": "Message from IBM Message Hub processed successfully processed" });
++      }
++    });
++
+   });
+ }
+ 
+diff --git a/cloud/sdr/sdr-data-processing/ibm-functions/actions/msgreceive_test.js b/cloud/sdr/sdr-data-processing/ibm-functions/actions/msgreceive_test.js
+index 90dff00..4bdbf1f 100644
+--- a/cloud/sdr/sdr-data-processing/ibm-functions/actions/msgreceive_test.js
++++ b/cloud/sdr/sdr-data-processing/ibm-functions/actions/msgreceive_test.js
+@@ -9,7 +9,13 @@ params = {
+ 	]
+ }
+ 
+-const result = msgreceive.main(params)
++// const result = msgreceive.main(params)
++// console.log("msgreceive.main() result:")
++// console.log(result)
+ 
+-console.log("msgreceive.main() result:")
+-console.log(result)
++msgreceive.main(params).then(function(response){
++	console.log("msgreceive.main() result:")
++	console.log(response)
++}, function(error) {
++    console.log(error.message);
++});
+-- 
+2.24.3 (Apple Git-128)
+
